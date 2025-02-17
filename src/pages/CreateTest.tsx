@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Button } from '../components/ui/button';
 import Input from '../components/ui/input';
 import Label from '../components/ui/label';
@@ -6,13 +6,26 @@ import { Card, CardContent } from '../components/ui/card';
 import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
 import { Check, Trash2 } from 'lucide-react';
+import { FormControl, InputLabel, Select, ListSubheader, MenuItem } from '@mui/material';
+import { SelectChangeEvent } from '@mui/material/Select';
 
 interface Question {
   question_text: string;
-  answer: string;
-  type: 'test' | 'text';
-  options?: string[];
-  correctOption?: number;
+  options: string[];
+  answer: number;
+}
+
+interface TopicGroup {
+  group: string;
+  items: string[];
+}
+
+interface TopicData {
+  [key: string]: string[];
+}
+
+interface TopicsState {
+  [key: string]: TopicData;
 }
 
 const CreateTest: React.FC = () => {
@@ -22,13 +35,11 @@ const CreateTest: React.FC = () => {
   const [questions, setQuestions] = useState<Question[]>([]);
   const [testCode, setTestCode] = useState<string>('');
 
-  const handleAddQuestion = (type: 'test' | 'text') => {
+  const handleAddQuestion = () => {
     const newQuestion: Question = {
       question_text: '',
-      answer: '',
-      type: type,
-      options: type === 'test' ? ['', '', '', ''] : undefined,
-      correctOption: type === 'test' ? undefined : undefined
+      options: ['', '', '', ''],
+      answer: -1
     };
     setQuestions([...questions, newQuestion]);
   };
@@ -54,8 +65,7 @@ const CreateTest: React.FC = () => {
   const handleSetCorrectOption = (questionIndex: number, optionIndex: number) => {
     setQuestions(prevQuestions => {
       const newQuestions = [...prevQuestions];
-      newQuestions[questionIndex].correctOption = optionIndex;
-      newQuestions[questionIndex].answer = String(optionIndex + 1);
+      newQuestions[questionIndex].answer = optionIndex;
       return newQuestions;
     });
   };
@@ -66,19 +76,23 @@ const CreateTest: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    
+    if (!title.trim() || !subject) {
+      alert('Пожалуйста, заполните все поля');
+      return;
+    }
+
     try {
-      const response = await axios.post(
-        'http://192.168.1.249:5000/create-test',
-        {
-          title,
-          subject,
-          questions: questions.map(q => ({
-            ...q,
-            question_text: q.question_text.trim(),
-            answer: q.answer.trim()
-          }))
-        }
-      );
+      const response = await axios.post('http://127.0.0.1:5000/create-test', {
+        title,
+        subject,
+        questions: questions.map(q => ({
+          question_text: q.question_text.trim(),
+          options: q.options,
+          answer: q.answer
+        }))
+      });
+      
       alert('Тест успешно создан!');
       setTestCode(response.data.code);
     } catch (error) {
@@ -119,7 +133,7 @@ const CreateTest: React.FC = () => {
                 required
               >
                 <option value="">Выберите предмет</option>
-                <option value="math">Математика</option>
+                <option value="математика">Математика</option>
                 <option value="ukrainian">Українська мова</option>
               </select>
             </div>
@@ -134,7 +148,7 @@ const CreateTest: React.FC = () => {
                   <h3 className="question-title">Вопрос {qIndex + 1}</h3>
                   <div className="question-actions">
                     <span className="question-type-badge">
-                      {question.type === 'test' ? 'Тестовый' : 'Текстовый'}
+                      Тестовый
                     </span>
                     <button
                       type="button"
@@ -154,44 +168,34 @@ const CreateTest: React.FC = () => {
                   required
                 />
 
-                {question.type === 'test' ? (
-                  <div className="options-grid">
-                    {question.options?.map((option, oIndex) => (
-                      <div key={oIndex} className="option-container">
-                        <div className="option-input-wrapper">
-                          <Input
-                            value={option}
-                            onChange={(e) => handleChangeOption(qIndex, oIndex, e.target.value)}
-                            placeholder={`Вариант ${oIndex + 1}`}
-                            className="option-input"
-                            required
-                          />
-                          <button
-                            type="button"
-                            onClick={() => handleSetCorrectOption(qIndex, oIndex)}
-                            className={`correct-option-button ${
-                              question.correctOption === oIndex ? 'active' : ''
-                            }`}
-                          >
-                            {question.correctOption === oIndex ? (
-                              <Check className="check-icon" />
-                            ) : (
-                              <div className="empty-check" />
-                            )}
-                          </button>
-                        </div>
+                <div className="options-grid">
+                  {question.options?.map((option, oIndex) => (
+                    <div key={oIndex} className="option-container">
+                      <div className="option-input-wrapper">
+                        <Input
+                          value={option}
+                          onChange={(e) => handleChangeOption(qIndex, oIndex, e.target.value)}
+                          placeholder={`Вариант ${oIndex + 1}`}
+                          className="option-input"
+                          required
+                        />
+                        <button
+                          type="button"
+                          onClick={() => handleSetCorrectOption(qIndex, oIndex)}
+                          className={`correct-option-button ${
+                            question.answer === oIndex ? 'active' : ''
+                          }`}
+                        >
+                          {question.answer === oIndex ? (
+                            <Check className="check-icon" />
+                          ) : (
+                            <div className="empty-check" />
+                          )}
+                        </button>
                       </div>
-                    ))}
-                  </div>
-                ) : (
-                  <textarea
-                    value={question.answer}
-                    onChange={(e) => handleChangeQuestion(qIndex, 'answer', e.target.value)}
-                    placeholder="Правильный ответ"
-                    className="text-answer-input"
-                    required
-                  />
-                )}
+                    </div>
+                  ))}
+                </div>
               </CardContent>
             </Card>
           ))}
@@ -209,17 +213,10 @@ const CreateTest: React.FC = () => {
           
           <Button 
             type="button"
-            onClick={() => handleAddQuestion('test')}
+            onClick={handleAddQuestion}
             className="submit-button animate-fade-in"
           >
             Добавить тестовый вопрос
-          </Button>
-          <Button 
-            type="button"
-            onClick={() => handleAddQuestion('text')}
-            className="submit-button animate-fade-in"
-          >
-            Добавить текстовый вопрос
           </Button>
           <Button 
             type="submit"
