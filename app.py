@@ -16,7 +16,23 @@ from typing import List, Dict
 
 # Настройка Google Gemini API
 genai.configure(api_key='AIzaSyBxoiv6GT1CKCZ9cq-iRDKyb8Y55imzTwE')
-model = genai.GenerativeModel('gemini-pro')
+
+generation_config = {
+    "temperature": 1,
+    "top_p": 0.95,
+    "top_k": 64,
+    "max_output_tokens": 8192,
+    "response_mime_type": "text/plain",
+}
+
+model = genai.GenerativeModel(
+    model_name="gemini-2.0-pro-exp-02-05",
+    generation_config=generation_config
+)
+
+# Создаем чат-сессию для каждого запроса
+def get_chat_session():
+    return model.start_chat(history=[])
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URI', 'mysql+pymysql://root:123123@192.168.1.245/db_name')
@@ -332,63 +348,73 @@ def get_test(code):
         print("Error in get_test:", str(e))
         return jsonify({'message': 'Ошибка при получении теста'}), 500
 
+async def analyze_topic_with_ai(question_text: str) -> str:
+    """Анализирует тему вопроса с помощью AI и возвращает подробный анализ"""
+    analysis_prompt = f"""Проанализируй математический вопрос и определи:
+1. Тему вопроса
+2. Уровень сложности (от 1 до 5)
+3. Тип вычислений
+4. Используемые числа
+
+Вопрос: {question_text}
+
+При анализе учитывай:
+- Если в вопросе простые числа (до 10) - это базовый уровень
+- Если используются только целые числа - это простой уровень
+- Если есть дроби/проценты - это средний уровень
+- Если есть сложные вычисления - это высокий уровень
+
+Верни ответ в формате JSON:
+{{
+    "topic": "название темы",
+    "complexity": число_от_1_до_5,
+    "calculation_type": "тип_вычислений",
+    "numbers_used": [список_чисел],
+    "operation": "используемая_операция"
+}}"""
+
+    response = await asyncio.to_thread(model.generate_content, analysis_prompt)
+    return response.text.strip()
+
 async def generate_test_variant(original_questions, test):
     print("\n=== Логирование генерации вариантов ===")
     print(f"Предмет: {test.subject}")
     print(f"Количество вопросов: {len(original_questions)}")
     
-    def check_discriminant(a, b, c):
-        """Вычисляет дискриминант квадратного уравнения"""
-        return b**2 - 4*a*c
-        
-    def check_arithmetic(expression):
-        """Проверяет арифметическое выражение"""
-        try:
-            expression = expression.replace('×', '*')
-            return eval(expression)
-        except:
-            return None
-            
+    all_generated_questions = []
+    chat_session = get_chat_session()
+    
     for question in original_questions:
-        response = await asyncio.to_thread(model.generate_content, prompt)
         try:
-            generated = json.loads(response.text)
+            topic_info = analyze_question_topic(question['question_text'])
+            prompt = generate_test_prompt(test.subject, topic_info, test.code)
+            response = await asyncio.to_thread(chat_session.send_message, prompt)
             
-            # Проверяем тему вопроса
-            question_lower = generated['question_text'].lower()
+            response_text = response.text.strip()
+            if response_text.startswith('```json'):
+                response_text = response_text[7:]
+            if response_text.endswith('```'):
+                response_text = response_text[:-3]
             
-            if 'дискриминант' in question_lower:
-                # Ищем коэффициенты в тексте
-                import re
-                coeffs = re.findall(r'(\d+)?x²?\s*([+-]\s*\d+)?x?\s*([+-]\s*\d+)?', question_lower)
-                if coeffs:
-                    a = int(coeffs[0][0]) if coeffs[0][0] else 1
-                    b_str = coeffs[0][1].replace(' ', '') if coeffs[0][1] else '0'
-                    b = int(b_str) if b_str else 0
-                    c_str = coeffs[0][2].replace(' ', '') if coeffs[0][2] else '0'
-                    c = int(c_str) if c_str else 0
-                    
-                    correct_d = check_discriminant(a, b, c)
-                    # Заменяем один из вариантов ответа на правильный
-                    generated['options'][0] = str(correct_d)
-                    generated['answer'] = 0
-                    
-            elif any(op in question_lower for op in ['+', '-', '*', '/', '×']):
-                nums = re.findall(r'\d+', question_lower)
-                ops = re.findall(r'[+\-*/×]', question_lower)
-                if nums and ops:
-                    expression = f"{nums[0]}{ops[0]}{nums[1]}"
-                    correct_result = check_arithmetic(expression)
-                    if correct_result is not None:
-                        # Заменяем один из вариантов ответа на правильный
-                        generated['options'][0] = str(correct_result)
-                        generated['answer'] = 0
-                        
-            all_generated_questions.append(generated)
+            generated_questions = json.loads(response_text.strip())
+            
+            if isinstance(generated_questions, list) and len(generated_questions) > 0:
+                for generated in generated_questions:
+                    # Проверяем уникальность вопроса
+                    if check_question_uniqueness(test.code, generated['question_text']):
+                        # Сохраняем вопрос в историю
+                        save_question_to_file(test.code, generated)
+                        all_generated_questions.append(generated)
+                        break
             
         except Exception as e:
             print(f"\nОшибка при обработке вопроса: {str(e)}")
-            all_generated_questions.append(question)
+            if "429 Resource has been exhausted" in str(e):
+                # Если превышен лимит API, возвращаем оригинальный вопрос
+                all_generated_questions.append(question)
+            else:
+                # Для других ошибок тоже возвращаем оригинальный вопрос
+                all_generated_questions.append(question)
             
     return all_generated_questions
 
@@ -426,29 +452,75 @@ def parse_gpt_response(response: str) -> list:
         print(f"Error parsing GPT response: {e}")
         return []
 
-def generate_test_prompt(subject: str, topic: str = None) -> str:
-    return f"""Ты - опытный учитель математики. Создай новые тестовые вопросы, похожие по сложности на оригинальные, но с другими числами и условиями.
+def generate_test_prompt(subject: str, topic_analysis: str, test_code: str) -> str:
+    try:
+        # Загружаем существующие вопросы
+        existing_questions = []
+        filename = f"question_history_{test_code}.json"
+        if os.path.exists(filename):
+            with open(filename, 'r', encoding='utf-8') as f:
+                existing_questions = json.load(f)
 
-Правила:
-1. Каждый вопрос должен быть уникальным
-2. Все вычисления должны быть простыми (результат не больше 100)
-3. Варианты ответов должны быть правдоподобными
-4. Только один вариант ответа должен быть правильным
-5. Используй простые математические операции: +, -, *, /
+        # Преобразуем topic_analysis в строку, если это словарь
+        if isinstance(topic_analysis, dict):
+            topic_analysis = json.dumps(topic_analysis, ensure_ascii=False)
 
-Пример вопроса:
-{{
-    "question_text": "Сколько будет 2 + 3?",
-    "options": ["3", "4", "5", "6"],
-    "answer": 2  // Индекс правильного ответа (0-3), в данном случае "5" это правильный ответ
-}}
+        analysis = json.loads(topic_analysis)
+        topic = analysis['topic']
+        complexity = analysis['complexity']
+        calculation_type = analysis['calculation_type']
+        numbers = analysis['numbers_used']
+        operation = analysis['operation']
+        
+        # Определяем диапазон чисел на основе сложности исходного вопроса
+        if complexity <= 2:
+            number_range = "от 1 до 10"
+            operations = "только сложение и вычитание"
+        elif complexity <= 3:
+            number_range = "от 1 до 20"
+            operations = "четыре основные арифметические операции"
+        else:
+            number_range = "от 1 до 100"
+            operations = "любые подходящие операции"
 
-Верни массив вопросов в формате JSON:
+        return f"""Ты - опытный учитель математики. Создай новый тестовый вопрос, похожий по сложности на исходный.
+
+Тема: {topic}
+Тип вычислений: {calculation_type}
+Используй числа: {number_range}
+Операции: {operations}
+
+ВАЖНО! 
+1. Создай вопрос, которого нет в этом списке:
+{json.dumps(existing_questions, ensure_ascii=False, indent=2)}
+
+2. Сохраняй тот же уровень сложности что и в исходном вопросе!
+
+3. ОБЯЗАТЕЛЬНО:
+- Реши задачу самостоятельно и проверь ответ
+- Убедись, что все числа в условии корректны
+- Проверь, что ответ математически верный
+- Убедись, что все варианты ответов уникальны
+- Один из вариантов должен быть правильным ответом
+- Остальные варианты должны быть правдоподобными, но неверными
+
+4. Рандомизуй ответы:
+- Правильный ответ должен быть случайно размещен (индекс от 0 до 3)
+- Остальные варианты должны быть логичными неправильными ответами
+
+Верни ответ в формате JSON:
 [
-    {{"question_text": "вопрос", "options": ["вариант1", "вариант2", "вариант3", "вариант4"], "answer": индекс_правильного_ответа}},
-    // другие вопросы...
+    {{
+        "question_text": "текст вопроса",
+        "options": ["вариант1", "вариант2", "вариант3", "вариант4"],
+        "answer": индекс_правильного_ответа,
+        "solution": "подробное решение задачи"
+    }}
 ]
 """
+    except Exception as e:
+        print(f"Ошибка при генерации промпта: {str(e)}")
+        return базовый_промпт_для_генерации()
 
 def identify_question_topic(question_text: str) -> tuple:
     """Определяет тему и класс вопроса по его содержанию"""
@@ -581,6 +653,184 @@ def get_topics(subject):
         topics = load_topics_from_file()
         return jsonify(topics)
     return jsonify({'message': 'Предмет не найден'}), 404
+
+def analyze_question_topic(question_text: str) -> dict:
+    """Анализирует тему вопроса и возвращает соответствующие данные"""
+    topic = identify_question_topic(question_text)
+    
+    # Определяем сложность на основе содержимого вопроса
+    complexity = 1  # По умолчанию простой уровень
+    if any(word in question_text.lower() for word in ['дробь', 'процент', '%']):
+        complexity = 3
+    elif any(word in question_text.lower() for word in ['умножить', 'разделить', '*', '/']):
+        complexity = 2
+        
+    # Определяем тип вычислений
+    calculation_type = "арифметика"  # По умолчанию
+    if 'уравнен' in question_text.lower():
+        calculation_type = "уравнения"
+        
+    # Находим числа в вопросе
+    numbers_used = re.findall(r'\d+', question_text)
+    
+    # Определяем операцию
+    operation = "сложение"  # По умолчанию
+    if '-' in question_text:
+        operation = "вычитание"
+    elif '*' in question_text or 'умнож' in question_text:
+        operation = "умножение"
+    elif '/' in question_text or 'дел' in question_text:
+        operation = "деление"
+            
+    return {
+        "topic": topic or "арифметика",
+        "complexity": complexity,
+        "calculation_type": calculation_type,
+        "numbers_used": numbers_used,
+        "operation": operation,
+        "examples": topic_examples.get(topic, ""),
+        "formulas": {}
+    }
+
+def generate_verification_prompt(question: dict, topic_info: dict) -> str:
+    """Создает промпт для проверки вопроса на основе темы"""
+    return f"""Проверь математический вопрос на основе следующих данных:
+
+Тема: {topic_info['topic']}
+
+Примеры по теме:
+{topic_info['examples']}
+
+Применимые формулы:
+{json.dumps(topic_info['formulas'], ensure_ascii=False, indent=2)}
+
+Вопрос для проверки:
+{question['question_text']}
+Варианты ответов: {question['options']}
+Указанный правильный ответ: {question['options'][question['answer']]}
+
+Проверь:
+1. Соответствует ли вопрос указанной теме
+2. Правильно ли составлены варианты ответов
+3. Верно ли указан правильный ответ
+4. Решаемая ли задача
+
+Верни ответ в формате JSON:
+{{
+    "is_valid": true/false,
+    "correct_answer": "правильный ответ",
+    "explanation": "объяснение проверки"
+}}
+"""
+
+def базовый_промпт_для_генерации() -> str:
+    """Возвращает базовый промпт для генерации вопросов, когда анализ темы не удался"""
+    return """Ты - опытный учитель математики. Создай новый простой тестовый вопрос.
+
+Правила:
+1. Вопрос должен быть очень простым (уровень начальной школы)
+2. Используй только целые числа от 1 до 10
+3. Используй только простые операции (сложение, вычитание)
+4. Создай 4 варианта ответа:
+   - Правильный ответ должен быть помещен в случайную позицию (0-3)
+   - Остальные три должны быть неправильными, но правдоподобными
+   - Неправильные ответы должны отличаться от правильного на 1-2 единицы
+   - Все варианты должны быть разными числами
+
+Верни ответ в формате JSON:
+[
+    {
+        "question_text": "вопрос",
+        "options": ["вариант1", "вариант2", "вариант3", "вариант4"],
+        "answer": случайный_индекс_правильного_ответа
+    }
+]
+"""
+
+def save_question_to_file(test_code: str, question: dict):
+    """Сохраняет вопрос в файл истории"""
+    filename = f"question_history_{test_code}.json"
+    try:
+        # Загружаем существующие вопросы
+        if os.path.exists(filename):
+            with open(filename, 'r', encoding='utf-8') as f:
+                questions = json.load(f)
+        else:
+            questions = []
+            
+        # Добавляем новый вопрос
+        questions.append(question)
+        
+        # Сохраняем обновленный список
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(questions, f, ensure_ascii=False, indent=2)
+            
+    except Exception as e:
+        print(f"Ошибка при сохранении вопроса: {str(e)}")
+
+def check_question_uniqueness(test_code: str, question_text: str) -> bool:
+    """Проверяет уникальность вопроса"""
+    filename = f"question_history_{test_code}.json"
+    try:
+        if os.path.exists(filename):
+            with open(filename, 'r', encoding='utf-8') as f:
+                questions = json.load(f)
+                return not any(q['question_text'].lower() == question_text.lower() for q in questions)
+        return True
+    except Exception as e:
+        print(f"Ошибка при проверке уникальности: {str(e)}")
+        return True
+
+@app.route('/check-answers', methods=['POST'])
+def check_answers():
+    try:
+        data = request.get_json()
+        user_answers = data.get('answers')
+        generated_questions = data.get('generated_questions')
+        
+        correct = 0
+        detailed_answers = []
+        
+        for i, question in enumerate(generated_questions):
+            user_answer_index = int(user_answers[i])
+            is_correct = user_answer_index == question['answer']
+            
+            # Убираем дополнительную проверку решения, так как она создает ложные срабатывания
+            if is_correct:
+                correct += 1
+                
+            detailed_answers.append({
+                'isCorrect': is_correct,
+                'userAnswer': question['options'][user_answer_index],
+                'correctAnswer': question['options'][question['answer']],
+                'questionText': question['question_text']
+            })
+        
+        return jsonify({
+            'correct': correct,
+            'total': len(generated_questions),
+            'answers': detailed_answers
+        })
+        
+    except Exception as e:
+        print(f"Ошибка при проверке ответов: {str(e)}")
+        return jsonify({'message': 'Ошибка при проверке ответов'}), 500
+
+def verify_solution(question_text: str, answer: str, solution: str) -> bool:
+    try:
+        # Извлекаем числа из текста вопроса
+        numbers = [int(n) for n in re.findall(r'\d+', question_text)]
+        # Извлекаем ответ как число
+        result = int(re.findall(r'\d+', answer)[0])
+        
+        # Проверяем соответствие решения и ответа
+        if "срезал" in question_text or "убрал" in question_text or "забрал" in question_text:
+            return sum(numbers[:-1]) - numbers[-1] == result
+        else:
+            return sum(numbers) == result
+            
+    except Exception:
+        return True  # В случае ошибки считаем ответ верным
 
 if __name__ == '__main__':
     save_topics_to_file()

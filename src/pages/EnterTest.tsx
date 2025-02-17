@@ -19,93 +19,49 @@ const EnterTest: React.FC = () => {
   const [test, setTest] = useState<{title: string; questions: Question[]} | null>(null);
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   const [currentAnswers, setCurrentAnswers] = useState<string[]>([]);
-  const [isAnimating, setIsAnimating] = useState(false);
-  const [isEntering, setIsEntering] = useState(true);
   const [showResults, setShowResults] = useState(false);
   const [results, setResults] = useState<{
     correct: number;
     total: number;
     answers: { isCorrect: boolean; userAnswer: string; correctAnswer: string; questionText: string }[];
   }>({ correct: 0, total: 0, answers: [] });
-  const [usedAnswers, setUsedAnswers] = useState<string[]>([]);
 
   const handleSubmitCode = async (e: React.FormEvent) => {
     e.preventDefault();
-    setIsAnimating(true);
     try {
       const response = await axios.get(`http://127.0.0.1:5000/get-test/${testCode}`);
       setTest(response.data);
       setCurrentAnswers(new Array(response.data.questions.length).fill(''));
-      setIsEntering(false);
+      setCurrentQuestionIndex(0);
+      setShowResults(false);
     } catch (error) {
       alert('Тест не найден');
     }
-    setTimeout(() => setIsAnimating(false), 500);
   };
 
-  const getRandomAnswer = (correctAnswer: string, options: string[]): string => {
-    // Получаем все индексы, кроме правильного ответа и уже использованных
-    const availableIndexes = options
-      .map((_, index) => index.toString())
-      .filter(index => 
-        index !== correctAnswer && 
-        !usedAnswers.includes(index)
-      );
-
-    // Если нет доступных вариантов, сбрасываем использованные ответы
-    if (availableIndexes.length === 0) {
-      setUsedAnswers([]);
-      return getRandomAnswer(correctAnswer, options);
-    }
-
-    // Выбираем случайный индекс из доступных
-    const randomIndex = Math.floor(Math.random() * availableIndexes.length);
-    const selectedAnswer = availableIndexes[randomIndex];
-    
-    // Добавляем выбранный ответ в использованные
-    setUsedAnswers(prev => [...prev, selectedAnswer]);
-    
-    return selectedAnswer;
-  };
-
-  const handleAnswerSelect = (value: string) => {
+  const handleAnswerSelect = async (value: string) => {
     const newAnswers = [...currentAnswers];
     newAnswers[currentQuestionIndex] = value;
     setCurrentAnswers(newAnswers);
     
     if (currentQuestionIndex === test!.questions.length - 1) {
-        calculateResults(newAnswers);
+      try {
+        const response = await axios.post('http://127.0.0.1:5000/check-answers', {
+          test_code: testCode,
+          answers: newAnswers.map(answer => parseInt(answer)),
+          generated_questions: test!.questions
+        });
+        setResults(response.data);
+        setShowResults(true);
+      } catch (error) {
+        alert('Ошибка при проверке ответов');
+      }
     } else {
-        setTimeout(() => {
-            setCurrentQuestionIndex(prev => prev + 1);
-        }, 500);
+      setCurrentQuestionIndex(prev => prev + 1);
     }
   };
 
-  const calculateResults = (answers: string[]) => {
-    let correct = 0;
-    const detailedAnswers = test!.questions.map((q, idx) => {
-        const userAnswerIndex = parseInt(answers[idx]);
-        const isCorrect = userAnswerIndex === q.answer;
-        if (isCorrect) correct++;
-        
-        return {
-            isCorrect,
-            userAnswer: q.options[userAnswerIndex] || 'Не отвечено',
-            correctAnswer: q.options[q.answer],
-            questionText: q.question_text
-        };
-    });
-
-    setResults({
-        correct,
-        total: test!.questions.length,
-        answers: detailedAnswers
-    });
-    setShowResults(true);
-  };
-
-  if (!test || isEntering) {
+  if (!test) {
     return (
       <div className="test-container enter-test-container">
         <div className="test-header">
@@ -113,37 +69,24 @@ const EnterTest: React.FC = () => {
             <button className="close-button" onClick={() => navigate('/home')}>✕</button>
           </div>
         </div>
-
+        
         <div className="enter-test-content">
-          <div className="auth-form-header">
-            <h2 className="auth-title animate-fade-in">Вход в тест</h2>
-            <p className="auth-subtitle animate-fade-in-delayed">
-              Введите код теста для начала
-            </p>
-          </div>
-
+          <h2>Введите код теста</h2>
           <form onSubmit={handleSubmitCode} className="enter-test-form">
-            <div className="form-group animate-slide-up">
-              <Input
-                type="text"
-                value={testCode}
-                onChange={(e) => setTestCode(e.target.value)}
-                placeholder="Введите код теста"
-                required
-              />
-            </div>
+            <input
+              type="text"
+              value={testCode}
+              onChange={(e) => setTestCode(e.target.value)}
+              placeholder="Введите код теста"
+              required
+            />
             <div className="enter-test-buttons">
-              <Button 
-                type="button" 
-                onClick={() => navigate('/home')}
-                className="back-button"
-                variant="secondary"
-              >
-                Назад в меню
-              </Button>
-              <Button type="submit" className="submit-button">
+              <button type="button" onClick={() => navigate('/home')} className="back-button">
+                Назад
+              </button>
+              <button type="submit" className="submit-button">
                 Начать тест
-              </Button>
+              </button>
             </div>
           </form>
         </div>
@@ -154,53 +97,36 @@ const EnterTest: React.FC = () => {
   if (showResults) {
     return (
       <div className="test-container results-view">
-        <div className="test-header">
-          <div className="progress-indicator">
-            <button className="close-button" onClick={() => navigate('/home')}>✕</button>
-          </div>
-        </div>
-
         <div className="results-content">
-          <div className="results-header">
-            <h2>Результаты теста</h2>
-            <div className="score-circle">
-              <div className="score-value">
-                {Math.round((results.correct / results.total) * 100)}%
-              </div>
-              <div className="score-label">
-                {results.correct} из {results.total}
-              </div>
-            </div>
+          <div className="score-circle">
+            <span className="score-value">{results.correct}/{results.total}</span>
+            <span className="score-label">Правильно</span>
           </div>
-
+          
           <div className="answers-review">
-            {results.answers.map((result, index) => (
-              <div key={index} className={`answer-review-item ${result.isCorrect ? 'correct' : 'incorrect'}`}>
-                <div className="question-review">
-                  <span className="question-number">#{index + 1}</span>
-                  <p>{result.questionText}</p>
+            {results.answers.map((answer, index) => (
+              <div key={index} className={`answer-review-item ${answer.isCorrect ? 'correct' : 'incorrect'}`}>
+                <div className="question-text">
+                  <span className="question-number">Вопрос {index + 1}:</span>
+                  {answer.questionText}
                 </div>
-                <div className="answer-details">
+                <div className="answer-comparison">
                   <div className="user-answer">
-                    <span>Ваш ответ:</span>
-                    <strong className={result.isCorrect ? 'correct-text' : 'incorrect-text'}>
-                      {result.userAnswer}
-                    </strong>
+                    <span>Ваш ответ: </span>
+                    <strong>{answer.userAnswer}</strong>
                   </div>
-                  {!result.isCorrect && (
-                    <div className="correct-answer">
-                      <span>Правильный ответ:</span>
-                      <strong>{result.correctAnswer}</strong>
-                    </div>
-                  )}
+                  <div className="correct-answer">
+                    <span>Правильный ответ: </span>
+                    <strong>{answer.correctAnswer}</strong>
+                  </div>
                 </div>
               </div>
             ))}
           </div>
-
-          <div className="results-actions">
-            <button className="retry-button" onClick={() => navigate('/home')}>
-              Завершить тест
+          
+          <div className="buttons-container">
+            <button onClick={() => navigate('/home')} className="back-button">
+              Вернуться на главную
             </button>
           </div>
         </div>
@@ -208,44 +134,31 @@ const EnterTest: React.FC = () => {
     );
   }
 
-  const currentQuestion = test.questions[currentQuestionIndex];
-
+  // Отображение вопросов теста
   return (
     <div className="test-container">
       <div className="test-header">
         <div className="progress-indicator">
-          <span>{currentQuestionIndex + 1} / {test.questions.length}</span>
-          <button className="close-button" onClick={() => navigate('/home')}>✕</button>
+          Вопрос {currentQuestionIndex + 1} из {test.questions.length}
         </div>
       </div>
 
       <div className="test-content">
         <div className="question-box">
-          <p className="question-text">{currentQuestion.question_text}</p>
-          
-          <div className="options-table">
-            <div className="options-row">
-              {currentQuestion.options.map((option, index) => (
-                <div key={index} className="option-cell">
-                  <span className="option-letter">{String.fromCharCode(65 + index)}</span>
-                  <span className="option-value">{option}</span>
-                </div>
-              ))}
-            </div>
+          <div className="question-text">
+            {test.questions[currentQuestionIndex].question_text}
           </div>
-        </div>
-
-        <div className="answer-section">
-          <h3 className="answer-prompt">Выберите верное решение</h3>
-          <div className="answer-grid">
-            {currentQuestion.options.map((_, index) => (
+          <div className="options-grid">
+            {test.questions[currentQuestionIndex].options.map((option, index) => (
               <button
                 key={index}
                 onClick={() => handleAnswerSelect(index.toString())}
-                className={`answer-button ${getOptionColor(index)}`}
-                disabled={currentAnswers[currentQuestionIndex] !== ''}
+                className={`option-button ${
+                  parseInt(currentAnswers[currentQuestionIndex]) === index ? 'selected' : ''
+                }`}
               >
-                {String.fromCharCode(65 + index)}
+                <span className="option-letter">{String.fromCharCode(65 + index)}</span>
+                <span className="option-text">{option}</span>
               </button>
             ))}
           </div>
