@@ -9,7 +9,7 @@ const Home: React.FC = () => {
     localStorage.removeItem('token');
     navigate('/login');
   };
-
+ 
   return (
     <div className="auth-form-container">
       <div className="auth-form-header">
